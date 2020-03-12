@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"os"
+  "regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,12 +56,13 @@ type KAStats struct {
 
 // Data type.
 type Data struct {
-	Iname          string  `json:"iname"`
-	IfpIfname      string  `json:"ifp_ifname"`
-	LastTransition float64 `json:"last_transition"`
-	Vrid           int     `json:"vrid"`
-	State          int     `json:"state"`
-	Wantstate      int     `json:"wantstate"`
+	Iname          string   `json:"iname"`
+	IfpIfname      string   `json:"ifp_ifname"`
+	LastTransition float64  `json:"last_transition"`
+	Vrid           int      `json:"vrid"`
+	State          int      `json:"state"`
+	Wantstate      int      `json:"wantstate"`
+  VirtualIps     []string `json:"virtual_ips"`
 }
 
 // Stats type.
@@ -94,7 +96,7 @@ func NewKACollector(useJSON bool) (*KACollector, error) {
 	coll := &KACollector{}
 	coll.useJSON = useJSON
 
-	labelsVrrp := []string{"name", "intf", "vrid", "state"}
+	labelsVrrp := []string{"vrrp_instance", "intf", "vrid", "state"}
 	metrics := map[string]*prometheus.Desc{
 		"keepalived_up":                       prometheus.NewDesc("keepalived_up", "Status", nil, nil),
 		"keepalived_vrrp_advert_rcvd":         prometheus.NewDesc("keepalived_vrrp_advert_rcvd", "Advertisements received", labelsVrrp, nil),
@@ -114,7 +116,7 @@ func NewKACollector(useJSON bool) (*KACollector, error) {
 	}
 
 	if handle, err := ipvs.New(""); err == nil {
-		labelsLVS := []string{"addr", "proto"}
+		labelsLVS := []string{"addr", "vrrp_instance", "proto"}
 		metrics["keepalived_lvs_vip_in_packets"] = prometheus.NewDesc("keepalived_lvs_vip_in_packets", "VIP in packets", labelsLVS, nil)
 		metrics["keepalived_lvs_vip_out_packets"] = prometheus.NewDesc("keepalived_lvs_vip_out_packets", "VIP out packets", labelsLVS, nil)
 		metrics["keepalived_lvs_vip_in_bytes"] = prometheus.NewDesc("keepalived_lvs_vip_in_bytes", "VIP in bytes", labelsLVS, nil)
@@ -172,7 +174,6 @@ func (k *KACollector) Collect(ch chan<- prometheus.Metric) {
 		if _, ok := state2string[st.Data.State]; ok {
 			state = state2string[st.Data.State]
 		}
-
 		ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_vrrp_advert_rcvd"], prometheus.CounterValue,
 			float64(st.Stats.AdvertRcvd), st.Data.Iname, st.Data.IfpIfname, strconv.Itoa(st.Data.Vrid), state)
 		ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_vrrp_advert_sent"], prometheus.CounterValue,
@@ -214,7 +215,7 @@ func (k *KACollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	for _, s := range svcs {
+  for _, s := range svcs {
 		dsts, err := k.handle.GetDestinations(s)
 		if err != nil {
 			log.Printf("keepalived_exporter: %v", err)
@@ -223,31 +224,32 @@ func (k *KACollector) Collect(ch chan<- prometheus.Metric) {
 
 		addr := s.Address.String() + ":" + strconv.Itoa(int(s.Port))
 		proto := strconv.Itoa(int(s.Protocol))
+    vrrp_instance := k.GetVrrpInstanceFromVirtualIp(&kaStats, s.Address.String())
 
 		ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_lvs_vip_in_packets"], prometheus.CounterValue,
-			float64(s.Stats.PacketsIn), addr, proto)
+			float64(s.Stats.PacketsIn), addr, vrrp_instance, proto)
 		ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_lvs_vip_out_packets"], prometheus.CounterValue,
-			float64(s.Stats.PacketsOut), addr, proto)
+			float64(s.Stats.PacketsOut), addr, vrrp_instance, proto)
 		ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_lvs_vip_in_bytes"], prometheus.CounterValue,
-			float64(s.Stats.BytesIn), addr, proto)
+			float64(s.Stats.BytesIn), addr, vrrp_instance, proto)
 		ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_lvs_vip_out_bytes"], prometheus.CounterValue,
-			float64(s.Stats.BytesOut), addr, proto)
+			float64(s.Stats.BytesOut), addr, vrrp_instance, proto)
 		ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_lvs_vip_conn"], prometheus.CounterValue,
-			float64(s.Stats.Connections), addr, proto)
+			float64(s.Stats.Connections), addr, vrrp_instance, proto)
 
 		for _, d := range dsts {
 			addr := d.Address.String() + ":" + strconv.Itoa(int(d.Port))
 
 			ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_lvs_rs_in_packets"], prometheus.CounterValue,
-				float64(d.Stats.PacketsIn), addr, proto)
+				float64(d.Stats.PacketsIn), addr, vrrp_instance, proto)
 			ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_lvs_rs_out_packets"], prometheus.CounterValue,
-				float64(d.Stats.PacketsOut), addr, proto)
+				float64(d.Stats.PacketsOut), addr, vrrp_instance, proto)
 			ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_lvs_rs_in_bytes"], prometheus.CounterValue,
-				float64(d.Stats.BytesIn), addr, proto)
+				float64(d.Stats.BytesIn), addr, vrrp_instance, proto)
 			ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_lvs_rs_out_bytes"], prometheus.CounterValue,
-				float64(d.Stats.BytesOut), addr, proto)
+				float64(d.Stats.BytesOut), addr, vrrp_instance, proto)
 			ch <- prometheus.MustNewConstMetric(k.metrics["keepalived_lvs_rs_conn"], prometheus.CounterValue,
-				float64(d.Stats.Connections), addr, proto)
+				float64(d.Stats.Connections), addr, vrrp_instance, proto)
 		}
 	}
 }
@@ -376,12 +378,24 @@ func (k *KACollector) parseData() ([]Data, error) {
 	dt := Data{}
 	scanner := bufio.NewScanner(bufio.NewReader(f))
 
+  regex := regexp.MustCompile(`^ +((?:(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]))\/[0-9]{2}`)
+
+  firstitem := true
+  ipcount := 0
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, " "+sep) && strings.Contains(line, prop) {
+      if firstitem == false && dt.Iname != "" {
+  			data = append(data, dt)
+  			dt = Data{}
+      }
+      firstitem = false
+
 			sp := strings.Split(strings.TrimSpace(line), prop)
 			dt.Iname = strings.TrimSpace(sp[1])
-		} else if strings.HasPrefix(line, "   ") && strings.Contains(line, prop) && dt.Iname != "" {
+      ipcount = 0
+    } else if strings.HasPrefix(line, "   ") && strings.Contains(line, prop) && dt.Iname != "" {
 			sp := strings.Split(strings.TrimSpace(line), prop)
 			key := strings.TrimSpace(sp[0])
 			val := strings.TrimSpace(sp[1])
@@ -410,16 +424,26 @@ func (k *KACollector) parseData() ([]Data, error) {
 				if state, ok := string2state[val]; ok {
 					dt.Wantstate = state
 				}
+      case "Virtual IP":
+  		  ipcount, err = strconv.Atoi(val)
+				if err != nil {
+					return data, err
+				}
 			}
+    } else if strings.HasPrefix(line, "     ") && ipcount > 0 && dt.Iname != "" {
+      match := regex.FindStringSubmatch(line)
+      if len(match) > 0 {
+        dt.VirtualIps = append(dt.VirtualIps, match[1])
+      }
 		} else if strings.HasPrefix(line, " VRRP Version") {
 			// noop
-		} else {
-			if dt.Iname != "" {
-				data = append(data, dt)
-				dt = Data{}
-			}
 		}
 	}
+
+  if dt.Iname != "" {
+    data = append(data, dt)
+    dt = Data{}
+  }
 
 	return data, nil
 }
@@ -530,4 +554,15 @@ func (k *KACollector) parseStats() ([]Stats, error) {
 	}
 
 	return data, nil
+}
+
+func (k *KACollector) GetVrrpInstanceFromVirtualIp(kaStats *[]KAStats, ip string) string {
+  for _, st := range *kaStats {
+    for _, vip := range st.Data.VirtualIps {
+      if vip == ip {
+        return st.Data.Iname
+      }
+    }
+  }
+  return ip
 }
